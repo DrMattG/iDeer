@@ -1,0 +1,24 @@
+---
+title: "Connectivity parameterisations"
+output: html_notebook
+---
+
+This script creates a series of connectivity layers. The layers differ by having different parametrisations - e.g., different sized dispersal kernels, or thematic resolutions of shelter quality etc. The code loops through all of these combinations of parametrisations and produces each of the connectivity layers.
+
+```{r}
+#a is the dispersal kernel 
+#b is the dispersal distance
+#c is the habitat raster - which is used as input into the resistance surface layer
+#d is 
+
+
+
+
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
