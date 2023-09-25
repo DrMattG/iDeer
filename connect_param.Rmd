@@ -16,7 +16,7 @@ library()
 ```{r}
 #a is the dispersal kernel  - two options 90, 95
 #b is the maximum dispersal distance - three options (5, 10, 15 k)
-#c is the habitat raster - which is used as input into the resistance surface layer. We will start with two alternative options, which might correspond to two alternative rankings offered by our experts.
+#c is the habitat raster - which is used as input into the resistance surface layer. We will start with two alternative options, which might correspond to two alternative rankings offered by our experts. themres1 and themres2
 #d is whether rivers feed into the resistance surface layer - 0/1
 #e is whether roads feed into the resistance surface layer - 0/1
 #f is the road layer thematic resolution - two options, separating roads into major and minor.
@@ -26,11 +26,15 @@ a <- c(90, 95)
 
 b <- c(5000, 10000, 15000)
 
-c <- 
+c <- c("themres1", "themres2")
   
-d <-
+d <- c(0,1)
   
-e <-
+e <- c(0,1)
 
+f <-  c("major.only", "major.medium") 
+
+g <-  c(0,1)
+    
 ```
 
