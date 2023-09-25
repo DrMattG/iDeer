@@ -5,20 +5,32 @@ output: html_notebook
 
 This script creates a series of connectivity layers. The layers differ by having different parametrisations - e.g., different sized dispersal kernels, or thematic resolutions of shelter quality etc. The code loops through all of these combinations of parametrisations and produces each of the connectivity layers.
 
+Load packages
+
 ```{r}
-#a is the dispersal kernel 
-#b is the dispersal distance
-#c is the habitat raster - which is used as input into the resistance surface layer
-#d is 
+library()
+```
 
 
 
+```{r}
+#a is the dispersal kernel  - two options 90, 95
+#b is the maximum dispersal distance - three options (5, 10, 15 k)
+#c is the habitat raster - which is used as input into the resistance surface layer. We will start with two alternative options, which might correspond to two alternative rankings offered by our experts.
+#d is whether rivers feed into the resistance surface layer - 0/1
+#e is whether roads feed into the resistance surface layer - 0/1
+#f is the road layer thematic resolution - two options, separating roads into major and minor.
+#g is whether linear features are included (hedges) - two options 0/1
 
+a <- c(90, 95)
+
+b <- c(5000, 10000, 15000)
+
+c <- 
+  
+d <-
+  
+e <-
 
 ```
 
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
-
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
-
-The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
