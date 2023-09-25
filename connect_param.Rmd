@@ -11,26 +11,52 @@ Load packages
 library()
 ```
 
+read in possible rasters
+
+```{r}
+# reclass the rasters
+lc <- raster()
+themres1 <- data.frame(is = 1:21, becomes = c(1:21))
+themres2 <- data.frame(is = 1:21, becomes = c(1:20,2))
+
+```
+
 
 
 ```{r}
 #a is the dispersal kernel  - two options 90, 95
 #b is the maximum dispersal distance - three options (5, 10, 15 k)
-#c is the habitat raster - which is used as input into the resistance surface layer. We will start with two alternative options, which might correspond to two alternative rankings offered by our experts.
+#c is the habitat raster - which is used as input into the resistance surface layer. We will start with two alternative options, which might correspond to two alternative rankings offered by our experts. themres1 and themres2
 #d is whether rivers feed into the resistance surface layer - 0/1
 #e is whether roads feed into the resistance surface layer - 0/1
 #f is the road layer thematic resolution - two options, separating roads into major and minor.
 #g is whether linear features are included (hedges) - two options 0/1
 
-a <- c(90, 95)
+a <- c(0.05, 0.10)
 
-b <- c(5000, 10000, 15000)
+b <- c(5000/25, 10000/25, 15000/25)
 
-c <- 
+c <- c("themres1", "themres2") # set these manually
+
+themres1 <- data.frame(is = 1:21, becomes = c(1:21))
+themres2 <- data.frame(is = 1:21, becomes = c(1:20,2))
   
-d <-
+d <- c(0,1)
   
-e <-
+e <- c(0,1)
+
+f <-  c("major.only", "major.medium") 
+
+g <-  c(0,1)
+
+
+param.table <- expand.grid(a,b,c,d,e,f,g)
+names(param.table) <- c("a","b","c","d","e","f","g")
+
+param.table  
+```
+
+```{r}
 
 ```
 
