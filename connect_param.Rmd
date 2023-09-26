@@ -8,16 +8,60 @@ This script creates a series of connectivity layers. The layers differ by having
 Load packages
 
 ```{r}
-library()
+#Load packages ####
+package.list = c("raster", "sp", "sf", "tidyverse", "plyr",  "dplyr", "fasterize", "units", "rgl", "rasterVis", "spatialEco", "reproducible", "viridis", 
+                 "osmdata","mapview","ggmap","ggspatial","tmap", "terra","spData","spDataLarge","stars","rgdal","rgeos","geodata","gdistance",
+                 "maptools","gridExtra","fasterize","rasterDT","ncdf4","readr","biomod2","gdistance","spdep", "ggplot2", "colorspace")
+tmp.install = which(lapply(package.list, require, character.only = TRUE)==FALSE)
+if(length(tmp.install)>0) install.packages(package.list[tmp.install])
+lapply(package.list, require, character.only = TRUE)
 ```
 
 read in possible rasters
 
 ```{r}
-# reclass the rasters
-lc <- raster()
-themres1 <- data.frame(is = 1:21, becomes = c(1:21))
-themres2 <- data.frame(is = 1:21, becomes = c(1:20,2))
+# Reclassify raster layers ####
+
+#land class
+lc <- raster("land_use_SE27.tif")# whole of eng and wales
+#roads
+roads <- raster("roads_SE27.tif")
+#woody linear features
+lf <- raster("linear_features_SE27.tif")
+
+#read in nfi shapefile (merged clusters)
+hab_patches <- st_read("nfi_woodlands_intersected_polygons.shp")
+
+#make a subset of hab_patches 
+
+hab_patches <- hab_patches%>%slice_sample(n=25)
+
+#Land class thematic res optons
+themres1_vals <- data.frame(is = 1:21, becomes = c(1:21))
+themres2_vals <- data.frame(is = 1:21, becomes = c(1:20,2))
+
+#Random values for forage quality and alternative forage
+#In the future this will be formed by expert opinion
+#Using random values for examples
+#Reclassify land use raster
+set.seed(123)
+range = c(1:10)
+fq <- sample(range, 21, replace = TRUE)
+altf <- sample(range, 21, replace = TRUE)
+forage_quality <- data.frame(is = 1:21, becomes = fq)
+alt_forage <- data.frame(is = 1:21, becomes = altf)
+
+#Reclassify
+themres1 <- reclassify(lc, themres1_vals)
+themres2 <- reclassify(lc, themres2_vals)
+forage_q_rast <- reclassify(lc, forage_quality)
+alt__forage_rast <- reclassify(lc, alt_forage)
+
+plot(lc_tr1)
+plot(lc_tr2)
+plot(fq_rast)
+plot(altf_rast)
+
 
 ```
 
@@ -40,23 +84,242 @@ c <- c("themres1", "themres2") # set these manually
 
 themres1 <- data.frame(is = 1:21, becomes = c(1:21))
 themres2 <- data.frame(is = 1:21, becomes = c(1:20,2))
-  
+
+#rivers  
 d <- c(0,1)
-  
+
+#roads  
 e <- c(0,1)
 
+#road thematic res
 f <-  c("major.only", "major.medium") 
 
+#linear features
 g <-  c(0,1)
 
+#DEM
+h <- c(0,1)
 
-param.table <- expand.grid(a,b,c,d,e,f,g)
-names(param.table) <- c("a","b","c","d","e","f","g")
 
+param.table <- expand.grid(a,b,c,d,e,f,g,h)
+names(param.table) <- c("a","b","c","d","e","f","g","h")
+param.table$combo_id = 1:nrow(param.table)
 param.table  
+
+#raster layers
+#raster.table <- expand.grid(c,d,e,f,g,h)
+#names(raster.table) <- c("c","d","e","f","g","h")
+#32 raster layers
+
 ```
 
-```{r}
 
+```{r}
+#Euclidean distance only fr now
+dispersal_cutoff <- 0.999 ### 99.9% cut off
+#Get resolution of raster cells
+cellres = res(lc)[[1]]
+
+#### CALCULATE CONNECTIVITY USING EUCLIDEAN DISTANCE ####
+#This is using points, NOT patches
+#so that it can be comparable with least cost distance (costDist function)
+
+#Get resolution of raster cells
+#cellres = res(LU)[[1]]
+
+#create an empty list of all the param.tables combos
+param.list = list()
+
+
+# loop through list #
+for(j in 1:nrow(param.table[1:5,])) { #Parameter table row = j
+
+  for (i in 1:nrow(hab_patches)) { #Woodland patch = i
+  
+  #calculate dispersal contribution
+  dispersal_contribution <-
+  -((log(1 / param.table$a[j])) / param.table$b[j]) # a is % disprsers, b is buffer size
+  
+  #buffer cutoff
+  buffer_cutoff <- round(log(1 / (1 - dispersal_cutoff)) / (log(1 / param.table$a[j]) /
+                                             param.table$b[j]), digits = 2)
+  # id single patch to measure from
+  focal_patch <- hab_patches[i,]
+  
+  # id patches to measure to
+  # buffer from selected focal patch by bufferDistance
+  #creates buffer by 11.53 units (red line)
+  focal_patch_buffer <- st_buffer(focal_patch, buffer_cutoff)
+  # select source patches within buffer distance of focal patch
+  source_patch <- st_filter(hab_patches, focal_patch_buffer, .predicate =st_intersects)
+  #get nearest points linestring between each focal patch and source patch
+  nearest_points <- st_nearest_points(focal_patch, source_patch)
+  #convert to points
+  pts <- st_cast(nearest_points, "POINT")
+  #convert to spatialpoints
+  pts_sp <- as(pts, "Spatial")
+  #calculate distance between all source patches to focal patch
+  patch_dist <- as.vector(st_distance(pts[1], pts[2]))
+  # create a data frame with all information in
+  Conn_table_site <- data.frame(focal_patch = focal_patch$cluster, 
+                                focal_patch_area = as.numeric(focal_patch$clstr_r),
+                                source_patch = source_patch$cluster, 
+                                source_patch_area = as.numeric(source_patch$clstr_r),
+                                distance = patch_dist,
+                                buffer =  param.table$b[j],
+                                combo_id = param.table$combo_id[j])%>%
+    mutate(distfin = distance/cellres) %>%
+    ### Calculate interconnectivity value
+    #mutate(coninter = (exp(-((log(1/param.table$a[j]))/param.table$b[j])*distfin)*(count(unique(source_patch)^2))))
+    mutate(incoming_connect = case_when(focal_patch == source_patch ~ NA_real_,
+                                        TRUE ~ source_patch_area * exp(dispersal_contribution*distfin)))
+  # add all points together
+  if(i == 1) {
+    Connectivity_table = Conn_table_site
+  } else {
+    Connectivity_table = rbind(Connectivity_table, Conn_table_site)
+  }
+param.list[[j]] <-  Connectivity_table
+
+  }    
+
+}
+
+all.dat <- bind_rows(param.list, .id = "combo_id")
+
+
+#remove NA's from table
+Connectivity_table_filt <- all.dat %>%
+  filter(!is.na(incoming_connect))
+#remove duplicated rows
+Connectivity_table_filt <- Connectivity_table_filt[!duplicated(Connectivity_table_filt),]
+
+```
+
+
+```{r}
+#### CALCULATE CONNECTIVITY USING LEAST-COST DISTANCE ####
+#This is using points, NOT polygons
+#Points used by costDistance function
+
+#Read in woodland polygons
+#NOTE: these have been merged to account for intersecting polygons
+#Original dataset was NFI woodland shapefile
+
+# Buffer distance represents the cut off - this stops the script measuring every pairwise combination
+dispersal_cutoff <- 0.999 ### 99.9% cut off
+
+hab_patches <- st_read("nfi_woodlands_intersected_polygons.shp")
+
+for(i in seq_along(param.table)) { #For each row in parameter table = i
+  
+ # make necessary raster layers
+  # make a conductance.raster
+  
+  conductance.raster <- 
+    
+    them.res1 
+  
+  
+  
+  for (j in seq_along(hab_patches)) { #For each woodland patch = j
+  
+  #select focal patch
+  focal_patch <- hab_patches_intersect[j,] 
+  #create transition layer 
+  tr.cost <- gdistance::transition(conductance.raster, transitionFunction = mean, directions = 8)
+  #calculate dispersal contribution
+  dispersal_contribution <-
+  -((log(1 / param.table$a[i])) / param.table$b[i])
+  #buffer cutoff
+  buffer_cutoff <- round(log(1 / (1 - dispersal_cutoff)) / (log(1 / param.table$a[i]) /
+                                             param.table$b[i]), digits = 2)
+  # id patches to measure to
+  # buffer from selected focal patch by bufferDistnace
+  #creates buffer by 11.53 units (red line)
+  focal_patch_buffer <- st_buffer(focal_patch, buffer_cutoff)
+  # select source patches within buffer distance of focal patch
+  source_patch <- st_filter(hab_patches_intersect, focal_patch_buffer, .predicate = st_intersects)
+  #get nearest points linestring between each focal patch and source patch
+  nearest_points <- st_nearest_points(focal_patch, source_patch)
+  #convert to points
+  pts <- st_cast(nearest_points, "POINT")
+  #convert to spatialpoints
+  pts_sp <- as(pts, "Spatial")
+  #calculate the least cost distances from all the source patches to the focal patch
+  lc_dist <- as.vector(gdistance::costDistance(tr.cost1C, pts_sp[1], pts_sp[2]))
+  #lc_dist <- as.vector(gdistance::costDistance(tr.cost1C, source_centroid, focal_centroid))
+  # create a data frame with all information in
+  Conn_table_site <- data.frame(focal_patch = focal_patch$cluster, 
+                                focal_patch_area = as.numeric(focal_patch$cluster_area),
+                                source_patch = source_patch$cluster, 
+                                source_patch_area = as.numeric(source_patch$cluster_area),
+                                lc_distance = lc_dist) %>% 
+    mutate(incoming_connect = case_when(focal_patch == source_patch ~ NA_real_,
+                                        TRUE ~ source_patch_area * exp(dispersal_contribution*lc_distance)))
+    # add all points together
+  if(i == 1) {
+    Connectivity_table_lc = Conn_table_site
+  } else {
+    Connectivity_table_lc = rbind(Connectivity_table_lc, Conn_table_site)
+  }
+}      
+  } 
+
+
+
+
+#Get resolution of raster cells
+cellres = res(LU)[[1]]
+
+# loop through list #
+for (i in 1:nrow(hab_patches_intersect)) {
+  
+  # id single patch to measure from
+  focal_patch <- hab_patches_intersect[i,]
+  
+  # id patches to measure to
+  # buffer from selected focal patch by bufferDistance
+  #creates buffer by 11.53 units (red line)
+  focal_patch_buffer <- st_buffer(focal_patch, buffer_cutoff)
+  # select source patches within buffer distance of focal patch
+  source_patch <- st_filter(hab_patches_intersect, focal_patch_buffer, .predicate =st_intersects)
+  #get nearest points linestring between each focal patch and source patch
+  nearest_points <- st_nearest_points(focal_patch, source_patch)
+  #convert to points
+  pts <- st_cast(nearest_points, "POINT")
+  #convert to spatialpoints
+  pts_sp <- as(pts, "Spatial")
+  #calculate distance between all source patches to focal patch
+  patch_dist <- as.vector(st_distance(pts[1], pts[2]))
+  # create a data frame with all information in
+  Conn_table_site <- data.frame(focal_patch = focal_patch$cluster, 
+                                focal_patch_area = as.numeric(focal_patch$cluster_area),
+                                source_patch = source_patch$cluster, 
+                                source_patch_area = as.numeric(source_patch$cluster_area),
+                                distance = patch_dist) %>%
+    mutate(distfin = patch_dist/cellres) %>%
+    ### Calculate interconnectivity value
+    mutate(coninter = (exp(-((log(1/percentage_dispersers))/dispersal_distance)*distfin)*(count(unique(source_patch)^2))))
+    #mutate(incoming_connect = case_when(focal_patch == source_patch ~ NA_real_,
+                                        #TRUE ~ source_patch_area * exp(dispersal_contribution*distance)))
+  # add all points together
+  if(i == 1) {
+    Connectivity_table = Conn_table_site
+  } else {
+    Connectivity_table = rbind(Connectivity_table, Conn_table_site)
+  }
+}    
+#H1
+#Connectivity
+
+#H2
+#Connectivity + Forage
+
+#H3 
+#Connectivity + Forage + Alternative forage
+
+#H4
+#Connectivity + Forage + Alternative forage (but different values)
 ```
 
