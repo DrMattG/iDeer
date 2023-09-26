@@ -1,0 +1,25 @@
+---
+title: "Fake data"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+dia <- read.csv("C:/Users/ij926050/Dropbox/TREE/iDeer/DIA_data.csv")
+dia
+dia%>%ggplot()+geom_jitter(aes(x=Act_score, y=Impact_sco, col=Fal))+facet_wrap(~Region)
+```
+Make fake data
+
+```{r}
+Connect = sample(seq(0.1,1, 0.1), nrow(dia), replace=T)
+  alt_Forage = sample(seq(0.1,1, 0.1), nrow(dia), replace=T)
+Forage = sample(seq(0.1,1, 0.1), nrow(dia), replace=T)
+dia <- dia%>%mutate(Connect =Connect,
+             Forage =Forage,
+             alt_Forage =alt_Forage)
+```
+
