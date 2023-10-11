@@ -1,0 +1,768 @@
+---
+title: "Connectivity parameterisations"
+output: html_notebook
+---
+
+This script creates a series of connectivity layers. The layers differ by having different parametrisations - e.g., different sized dispersal kernels, or thematic resolutions of shelter quality etc. The code loops through all of these combinations of parametrisations and produces each of the connectivity layers.
+
+Load packages
+
+```{r include = FALSE}
+#Load packages ####
+package.list = c("raster", "sp", "sf", "tidyverse", "plyr", "dplyr", "fasterize", "units", "rgl", "rasterVis", "spatialEco", "reproducible", "viridis", 
+                 "osmdata","mapview","ggmap","ggspatial","tmap", "terra","spData","spDataLarge","stars","rgdal","rgeos","geodata","gdistance",
+                 "maptools","gridExtra","fasterize","rasterDT","ncdf4","readr","biomod2","gdistance","spdep", "ggplot2", "colorspace")
+tmp.install = which(lapply(package.list, require, character.only = TRUE)==FALSE)
+if(length(tmp.install)>0) install.packages(package.list[tmp.install])
+lapply(package.list, require, character.only = TRUE)
+```
+
+read in possible rasters
+
+```{r}
+# Reclassify raster layers ####
+#ensure they have the correct crs
+bng <- crs("+init=epsg:27700")
+
+#land class
+lc <- raster(here::here("data/land_use_SE27.tif"))# whole of eng and wales
+crs(lc) <- bng
+
+#roads
+roads <- raster(here::here("data/roads_SE27.tif"))
+crs(roads) <- bng
+#replace all 0 values with NA
+roads[roads == 0] <- NA
+
+#slope ####
+
+slope <- raster(here::here("data/slope_25m_EW.tif"))
+crs(slope) <- bng
+slope_se27 <- resample(slope, roads)
+writeRaster(slope_se27, "data/slope_25m_SE27_resampled.tif",overwrite=TRUE)
+#Reclassify slope into accessible/inaccessible based on Vavra & Ganskopp (1987)
+#cited here: https://link.springer.com/article/10.1007/s10980-022-01521-w
+#Deer tend to avoid slopes at or above 37 degrees
+#Remember higher values = lower resistance (conductance values)
+#1 = accessible
+#0 = not accessible
+#The vast majority of UK will be accessible, 37 degrees will only apply to cliff faces etc.
+quantile(slope)
+ #      0%        25%        50%        75%       100% 
+ # 0.0000000  0.7274767  2.0233176  4.7609401 66.9398956 
+slope_reclass <- matrix(c(0,36.999,1,
+                          37, Inf, 0), ncol = 3, byrow = TRUE)
+slope_cat <- reclassify(slope_se27, slope_reclass)
+#This is your categorical slope map
+plot(slope_cat)
+
+
+#subset roads into major and minor
+major_roads <- 1:3
+minor_vals <- 4:6
+major_mask <- roads %in% 4:6
+#NOT WORKING - need to separate in shapefile before you convert to raster
+
+#make example layers for now
+major_roads <- roads
+minor_roads <- roads
+
+#saveRDS(major_roads, "data/major_roads_se27.rds")
+#saveRDS(minor_roads, "data/minor_roads_se27.rds")
+writeRaster(major_roads, "data/major_roads_se27.tif",overwrite=TRUE)
+writeRaster(minor_roads, "data/minor_roads_se27.tif",overwrite=TRUE)
+
+#woody linear features
+#lf <- raster("data/linear_features_SE27.tif")
+lf <- raster("data/lf_SE27_nfi_masked.tif")
+crs(lf) <- bng
+lf<-resample(lf,roads)
+writeRaster(lf,"data/lf_SE27_nfi_masked_resampled.tif",overwrite=TRUE)
+
+#Read in NFI shapefile 
+#NOTE: these have been merged to account for intersecting polygons
+#clusters = groups of intersecting polygons
+#Original dataset was NFI woodland shapefile
+hab_patches <- st_read("/data/nfi_woodlands_intersected_polygons.shp")
+
+
+#make a subset of hab_patches to speed up testing
+set.seed(123)
+hab_patches <- hab_patches%>%slice_sample(n=25)
+
+#Land class thematic res options
+#As an example: value 20 becomes 2
+themres1_vals <- data.frame(is = 1:21, becomes = c(1:21))
+themres2_vals <- data.frame(is = 1:21, becomes = c(1:20,2))
+
+#Random values for forage quality and alternative forage
+#In the future this will be formed by expert opinion
+#Using random values for examples
+#Reclassify land use raster
+set.seed(123)
+range = c(1:10)
+#Forage quality
+fq <- sample(range, 21, replace = TRUE)
+forage_quality <- data.frame(is = 1:21, becomes = fq)
+#Alternative forage
+altf <- sample(range, 21, replace = TRUE)
+alt_forage <- data.frame(is = 1:21, becomes = altf)
+
+#Reclassify lc thematic res
+themres1 <- reclassify(lc, themres1_vals)
+themres2 <- reclassify(lc, themres2_vals)
+#Reclassify lc for forage quality
+forage_q_rast <- reclassify(lc, forage_quality)
+#Reclassify lc for alternative forage
+alt_forage_rast <- reclassify(lc, alt_forage)
+
+plot(themres1)
+plot(themres2)
+plot(forage_q_rast)
+plot(alt_forage_rast)
+
+#saveRDS(themres1, "data/themres1.RDS")
+#saveRDS(themres2, "data/themres2.RDS")
+
+writeRaster(themres1, "data/themres1.tif",overwrite=TRUE)
+writeRaster(themres2, "data/themres2.tif",overwrite=TRUE)
+
+saveRDS(forage_q_rast, "data/forage_q_rast.RDS")
+saveRDS(alt_forage_rast, "data/alt_forage_rast.RDS")
+
+```
+
+
+
+```{r}
+#pd is the dispersal kernel  - two options 90, 95
+#md is the maximum dispersal distance - three options (5, 10, 15 k)
+#tr is the habitat raster - which is used as input into the resistance surface layer. We will start with two alternative options, which might correspond to two alternative rankings offered by our experts. themres1 and themres2
+#? is whether rivers feed into the resistance surface layer - 0/1
+#road_layers is the road layer thematic resolution - four options: major, minor, all
+#lf_layers is whether linear features are included (hedges) - present/absent
+
+#percentage dispersers - 5% or 10%
+pd <- c(0.05, 0.10)
+
+#max dispersal distance - 5km, 10km, 15km
+md <- c(5000/25, 10000/25, 15000/25)
+
+#relative weightings
+#make all combinations of 0, 1 and 2 for presence/absence and 2x of three variables
+wts <- tidyr::crossing(var1 = 0:2, var2 = 0:2, var3 = 0:2, var4 = 0:2)
+
+#collapse columns into 1 column
+wts <- paste(wts$var1, wts$var2, wts$var3, wts$var4, sep = "")
+
+#var 1
+#thematic res for land cover
+tr <- c("themres1", "themres2") # set these manually
+
+#var 2
+#layer names for roads
+road_layers <- c("minor_roads_se27","major_roads_se27","roads_SE27")
+
+#var 3
+#layer names for linear features
+lf_layers <- c("lf_SE27_nfi_masked_resampled")
+
+#var 4
+#layer name for terrain ruggedness index
+tri_layers <- c("terrain_rugged_index_25m_SE27_resampled")
+
+param.table <- expand.grid(pd,md,wts,tr, road_layers, lf_layers, tri_layers)
+names(param.table) <- c("pd","md","wts","land_cover","road_layers","lf_layers", "tri_layers")
+
+#create columns in param.table showing whether each variable is left out (0), included (1), or doubled (2) ####
+
+#rivers  
+#param.table <- param.table %>% mutate(river.inc = substr(param.table$g,1,1))
+
+#land cover
+param.table <- param.table %>% mutate(land.cover.inc = substr(param.table$wts,1,1))
+param.table$land.cover.inc <- as.numeric(param.table$land.cover.inc)
+
+#roads
+param.table <- param.table %>% mutate(road.inc = substr(param.table$wts,2,2))
+param.table$road.inc <- as.numeric(param.table$road.inc)
+
+#minor roads
+#param.table <- param.table %>% mutate(minor.rd.inc = substr(param.table$wts,3,3))
+
+#linear features
+param.table <- param.table %>% mutate(lf.inc = substr(param.table$wts,3,3))
+param.table$lf.inc <- as.numeric(param.table$lf.inc)
+
+#Terrain ruggedness index
+param.table <- param.table %>% mutate(tri.inc = substr(param.table$wts,4,4))
+param.table$tri.inc <- as.numeric(param.table$tri.inc)
+
+#Remove rows which contain all zeros (0000) as cannot test empty transition layer
+#NO POINT IN TESTING EMPTY TRANSITION LAYER (0000), just test layers than contain at least one variable
+
+param.table <- param.table[!grepl("0000", param.table$wts),]
+
+#Get unique row ID
+
+param.table$combo_id = 1:nrow(param.table)
+
+param.table  
+
+#raster layers
+#raster.table <- expand.grid(c,d,e,f)
+#names(raster.table) <- c("c","d","e","f")
+#32 raster layers
+
+```
+
+
+```{r}
+#### CALCULATE CONNECTIVITY USING EUCLIDEAN DISTANCE ####
+#This is using points, NOT patches
+#so that it can be comparable with least cost distance (costDist function)
+
+#Use woodland centroids, not nearest neighbour points
+#If the cost of moving through a woodland is zero, the accumulated least cost won't increase until outside the woodland
+
+dispersal_cutoff <- 0.999 ### 99.9% cut off
+#Get resolution of raster cells
+cellres = res(lc)[[1]]
+
+#make parameter table containing just dispersal kernel parameters
+params.kernel <- subset(param.table[1:2])
+#remove duplicates
+params.kernel <- params.kernel[!duplicated(params.kernel),]
+
+
+#create an empty list of all the param.tables combos
+param.list = list()
+
+
+# loop through list #
+for(j in 1:nrow(params.kernel[1:5,])) { #Parameter table row = j, using rows 1-5 for example
+
+  for (i in 1:nrow(hab_patches)) { #Woodland patch = i
+  
+  #calculate dispersal contribution
+  dispersal_contribution <-
+  -((log(1 / params.kernel$pd[j])) / params.kernel$md[j]) # pd is % dispersers, b is buffer size
+  
+  #buffer cutoff
+  buffer_cutoff <- round(log(1 / (1 - dispersal_cutoff)) / (log(1 / params.kernel$pd[j]) /
+                                             params.kernel$md[j]), digits = 2)
+  # id single patch to measure from
+  focal_patch <- hab_patches[i,]
+  
+  # id patches to measure to
+  # buffer from selected focal patch by bufferDistance
+  #creates buffer by 11.53 units (red line)
+  focal_patch_buffer <- st_buffer(focal_patch, buffer_cutoff)
+  # select source patches within buffer distance of focal patch
+  source_patch <- st_filter(hab_patches, focal_patch_buffer, .predicate =st_intersects)
+  #get centroids of focal patch ###
+  focal_centroid <- st_centroid(st_geometry(focal_patch)) %>%
+  #make sure crs is bng
+  st_transform(., bng) %>%
+  # centroid geometry
+  st_geometry()
+  #get centroid of source patch ###
+  source_centroid <- st_centroid(st_geometry(source_patch)) %>%
+  #make sure crs is bng
+  st_transform(., bng) %>%
+  # centroid geometry
+  st_geometry()
+  #calculate Euclidean distance between centroids
+  patch_dist <- as.vector(st_distance(st_geometry(focal_centroid), st_geometry(source_centroid)))
+  # create a data frame with all information in
+  Conn_table_site <- data.frame(focal_patch = focal_patch$cluster,
+                                focal_patch_area = focal_patch$clstr_r,
+                                source_patch = source_patch$cluster, 
+                                source_patch_area = source_patch$clstr_r,
+                                distance = patch_dist,
+                                buffer = params.kernel$md[j],
+                                perc.disp = params.kernel$pd[j])%>%
+                                #combo_id = param.table$combo_id[j]) %>%
+    mutate(distfin = distance/cellres) %>%
+    mutate(distfin = as.numeric(distfin)) %>%
+    ### Calculate interconnectivity value
+    mutate(coninter = (exp(-((log(1/params.kernel$pd[j]))/params.kernel$md[j])*distfin)*(focal_patch_area^2))) %>%
+    ### Calculate incoming connectivity
+    mutate(incoming_connect = case_when(focal_patch == source_patch ~ NA_real_,
+                                        TRUE ~ source_patch_area * exp(dispersal_contribution*distfin)))
+  
+    #Create final dataframe containing the intra and inter-patch connectivity
+  
+  dfin <- data.frame(focal_id = focal_patch$cluster,
+                     focal_patch_area = as.numeric(focal_patch$clstr_r),
+                     source_id = source_patch$cluster, 
+                     source_patch_area = as.numeric(source_patch$clstr_r),
+                     buffer = params.kernel$md[j],
+                     perc.disp = params.kernel$pd[j], 
+                     distfin = Conn_table_site$distfin, 
+                     coninter = sum(Conn_table_site$coninter), 
+                     conintra = ((Conn_table_site$focal_patch_area^2)*(Conn_table_site$focal_patch_area^2)*1),
+                     incoming_connect = Conn_table_site$incoming_connect,
+                     comp = sum(Conn_table_site$focal_patch_area^2)) %>%
+                     mutate(compN = comp/(sum(Conn_table_site$focal_patch_area)^2), 
+                     configN = coninter/(sum(Conn_table_site$focal_patch_area)^2)) %>%
+                     mutate(philcont = coninter*Conn_table_site$focal_patch_area^2)
+  
+  # add all points together
+  #if(i == 1) {
+  #  Connectivity_table = Conn_table_site
+ # } else {
+  #  Connectivity_table = rbind(Connectivity_table, Conn_table_site)
+ # }
+  
+   if(i == 1) {
+    Connectivity_table = dfin
+  } else {
+    Connectivity_table = rbind(Connectivity_table, dfin)
+  }
+param.list[[j]] <-  Connectivity_table
+
+  }    
+
+}
+
+all.dat <- bind_rows(param.list)
+
+#remove rows where focal id = source id
+all.dat <- all.dat[all.dat$focal_id != all.dat$source_id, ]
+
+
+```
+
+```{r}
+#Plot coninter and conintra as a function of Euclidean distance ####
+
+#sum coninter and conintra by focal patch
+connect_sum <- all.dat %>%
+  select(focal_id, coninter, conintra) %>%
+  group_by(focal_id) %>%
+  dplyr::summarise(total_coninter = sum(coninter),
+                   total_conintra = sum(conintra),
+                   n = n())
+
+hist(connect_sum$total_coninter)
+hist(connect_sum$total_conintra)
+
+#log transform connectivity values
+connect_sum$total_coninter_log <- log(
+  connect_sum$total_coninter
+)
+
+connect_sum$total_conintra_log <- log(
+  connect_sum$total_conintra
+)
+
+hist(connect_sum$total_coninter_log)
+hist(connect_sum$total_conintra_log)
+
+#Add geometry
+connect_sum$geometry<-hab_patches$geometry[match(connect_sum$focal_id, hab_patches$cluster)]
+
+#Plot coninter
+
+ggplot(data = connect_sum$geometry) +
+  geom_sf(aes(fill = (connect_sum$total_coninter_log)), size = 0.2) +
+  scale_fill_viridis_c(option = "inferno", name = "Log Interconnectivity")
+
+#Plot conintra
+
+ggplot(data = connect_sum$geometry) +
+  geom_sf(aes(fill = (connect_sum$total_conintra_log)), size = 0.2) +
+  scale_fill_viridis_c(option = "inferno", name = "Log Intraconnectivity")
+
+```
+
+```{r}
+####FUNCTION FOR MAKING TRANSITION LAYERS ####
+#Making transition layers
+  
+#function for looping through parameter table combinations:
+
+createtransitionfunc <- function(param.table) {
+  
+#Make empty list of transition layers 
+
+all.tr.layers <- list()
+
+#loop over layer combinations in param.table
+  
+  for (i in 1:nrow(param.table[1:5,])) {
+
+  # Load the raster layers based on conditions
+    
+  land_cover_layer <- raster(paste0(here::here(),"/data/",param.table$land_cover[i],".tif"))
+  crs(land_cover_layer) <- bng
+
+  road_layer <- raster(paste0(here::here(),"/data/",param.table$road_layers[i],".tif"))
+  crs(road_layer) <- bng
+  
+  lf_layer <- raster(paste0(here::here(),"/data/",param.table$lf_layers[i],".tif"))
+  crs(lf_layer) <- bng
+  
+  tri_layer <- raster(paste0(here::here(),"/data/",param.table$tri_layers[i],".tif"))
+  crs(tri_layer) <- bng
+  
+  
+  #multiply layers by value in .inc columns (0, 1 or 2)
+  #ALL RASTERS NEED TO HAVE SAME PROJECTION AND EXTENT
+
+  land_cover_val <- as.numeric(param.table$land.cover.inc[i])*land_cover_layer
+  road_val <- as.numeric(param.table$road.inc[i])*road_layer
+  lf_val <- as.numeric(param.table$lf.inc[i])*lf_layer
+  tri_val <- as.numeric(param.table$tri.inc[i])*tri_layer
+  
+  
+  #create transition layers
+  lc.cost <- gdistance::transition(land_cover_val, transitionFunction = mean, directions = 8)
+  road.cost <- gdistance::transition(road_val, transitionFunction = mean, directions = 8)
+  lf.cost <- gdistance::transition(lf_val, transitionFunction = mean, directions = 8)
+  tri.cost <- gdistance::transition(tri_val, transitionFunction = mean, directions = 8)
+  
+  #Add layers together to create final transition layer
+  transition_lyr <- lc.cost + road.cost + lf.cost + tri.cost
+  
+  #convert transition_lyr to raster
+  #transition_raster <- raster(transition_lyr)
+  
+  #store transition layer in list
+  
+    all.tr.layers[[i]] <-  transition_lyr
+  
+  #ID objects in list by combo_id
+for (j in seq_along(all.tr.layers)) {
+  if (j <= nrow(param.table)) {
+    all.tr.layers[[j]]@title <- as.character(param.table$combo_id[j])
+        }
+     }
+
+   }
+  
+ }
+
+createtransitionfunc(param.table)
+```
+
+
+```{r}
+#### CALCULATE CONNECTIVITY USING LEAST-COST DISTANCE ####
+#This is using points, NOT polygons
+#Points used by costDistance function
+
+#investigate barriers in transition layers - how to combine with continuous layers??
+
+# Buffer distance represents the cut off - this stops the script measuring every pairwise combination
+dispersal_cutoff <- 0.999 ### 99.9% cut off
+
+#Get resolution of raster cells
+cellres = res(lc)[[1]]
+
+#create an empty list of all the param.tables combos
+param.list = list()
+
+# loop through list #
+for(j in 1:nrow(param.table[1:5,])) { #Parameter table row = j, using rows 1-5 for example
+  
+      for (k in 1:length(all.tr.layers[1:5])) { #Transition layer = k
+
+            for (i in 1:nrow(hab_patches)) { #Woodland patch = i
+    
+  
+  #calculate dispersal contribution
+  dispersal_contribution <-
+  -((log(1 / param.table$pd[j])) / param.table$md[j]) # a is % disprsers, b is buffer size
+  
+  #buffer cutoff
+  buffer_cutoff <- round(log(1 / (1 - dispersal_cutoff)) / (log(1 / param.table$pd[j]) /
+                                             param.table$md[j]), digits = 2)
+
+   # id single patch to measure from
+  focal_patch <- hab_patches[i,]
+  
+  # id patches to measure to
+  # buffer from selected focal patch by bufferDistance
+  #creates buffer by 11.53 units (red line)
+  focal_patch_buffer <- st_buffer(focal_patch, buffer_cutoff)
+  # select source patches within buffer distance of focal patch
+  source_patch <- st_filter(hab_patches, focal_patch_buffer, .predicate =st_intersects)
+  #get centroids of focal patch ###
+  focal_centroid <- st_centroid(st_geometry(focal_patch)) %>%
+  #make sure crs is bng
+  st_transform(., bng) %>%
+  # centroid geometry
+  st_geometry()
+  #make sp object
+  focal_centroid <- as(focal_centroid,"Spatial")
+  #get centroid of source patch ###
+  source_centroid <- st_centroid(st_geometry(source_patch)) %>%
+  #make sure crs is bng
+  st_transform(., bng) %>%
+  # centroid geometry
+  st_geometry()
+  #make spatial object
+  source_centroid <- as(source_centroid,"Spatial")
+  #calculate least-cost distance between centroids
+  lc_dist <- as.vector(gdistance::costDistance(all.tr.layers[[k]], focal_centroid[1], source_centroid[1]))
+  #If lc_dist = Inf, convert to 0
+  # create a data frame with all information in
+  Conn_table_site <- data.frame(focal_patch = focal_patch$cluster,
+                                focal_patch_area = focal_patch$clstr_r,
+                                source_patch = source_patch$cluster, 
+                                source_patch_area = source_patch$clstr_r,
+                                least_cost_dist = lc_dist,
+                                buffer = param.table$md[j],
+                                perc.disp = param.table$pd[j],
+                                combo_id = param.table$combo_id[j]) %>%
+    mutate(lc_distfin = least_cost_dist/cellres) %>%
+    mutate(lc_distfin = as.numeric(lc_distfin)) %>%
+    ### Calculate interconnectivity value
+    mutate(coninter = (exp(-((log(1/param.table$pd[j]))/param.table$md[j])*lc_distfin)*(focal_patch_area^2))) %>%
+    ### Calculate incoming connectivity
+    mutate(incoming_connect = case_when(focal_patch == source_patch ~ NA_real_,
+                                        TRUE ~ source_patch_area * exp(dispersal_contribution*lc_distfin)))
+  
+    #Create final dataframe containing the intra and inter-patch connectivity
+  
+  dfin <- data.frame(focal_id = focal_patch$cluster,
+                     focal_patch_area = as.numeric(focal_patch$clstr_r),
+                     source_id = source_patch$cluster, 
+                     source_patch_area = as.numeric(source_patch$clstr_r),
+                     buffer = param.table$md[j],
+                     perc.disp = param.table$pd[j], 
+                     tr.layer = all.tr.layers[[k]]@title,
+                     lc_distfin = Conn_table_site$lc_distfin, 
+                     coninter = sum(Conn_table_site$coninter), 
+                     conintra = ((Conn_table_site$focal_patch_area^2)*(Conn_table_site$focal_patch_area^2)*1),
+                     incoming_connect = Conn_table_site$incoming_connect,
+                     comp = sum(Conn_table_site$focal_patch_area^2)) %>%
+                     mutate(compN = comp/(sum(Conn_table_site$focal_patch_area)^2), 
+                     configN = coninter/(sum(Conn_table_site$focal_patch_area)^2)) %>%
+                     mutate(philcont = coninter*Conn_table_site$focal_patch_area^2)
+  
+  # add all points together
+  #if(i == 1) {
+  #  Connectivity_table = Conn_table_site
+ # } else {
+  #  Connectivity_table = rbind(Connectivity_table, Conn_table_site)
+ # }
+  
+   if(i == 1) {
+    Connectivity_table = dfin
+  } else {
+    Connectivity_table = rbind(Connectivity_table, dfin)
+  }
+param.list[[j]] <-  Connectivity_table
+
+  }    
+
+ }
+
+}
+all.dat.lc <- bind_rows(param.list)
+
+#remove rows where focal id = source id
+all.dat.lc <- all.dat.lc[all.dat.lc$focal_id != all.dat.lc$source_id, ]
+
+
+
+```
+
+```{r}
+#Plot coninter and conintra as a function of least cost distance ####
+
+#sum coninter and conintra by focal patch
+connect_sum_lc <- all.dat.lc %>%
+  select(focal_id, coninter, conintra) %>%
+  group_by(focal_id) %>%
+  dplyr::summarise(total_coninter = sum(coninter),
+                   total_conintra = sum(conintra),
+                   n = n())
+
+hist(connect_sum_lc$total_coninter)
+hist(connect_sum_lc$total_conintra)
+
+#log transform connectivity values
+connect_sum_lc$total_coninter_log <- log(
+  connect_sum_lc$total_coninter
+)
+
+connect_sum_lc$total_conintra_log <- log(
+  connect_sum_lc$total_conintra
+)
+
+hist(connect_sum_lc$total_coninter_log)
+hist(connect_sum_lc$total_conintra_log)
+
+#Add geometry
+connect_sum_lc$geometry<-hab_patches$geometry[match(connect_sum_lc$focal_id, hab_patches$cluster)]
+
+#Plot coninter
+
+ggplot(data = connect_sum_lc$geometry) +
+  geom_sf(aes(fill = (connect_sum_lc$total_coninter_log)), size = 0.2) +
+  scale_fill_viridis_c(option = "inferno", name = "Log Interconnectivity")
+
+#Plot conintra
+
+ggplot(data = connect_sum_lc$geometry) +
+  geom_sf(aes(fill = (connect_sum_lc$total_conintra_log)), size = 0.2) +
+  scale_fill_viridis_c(option = "inferno", name = "Log Intraconnectivity")
+
+```
+
+```{r}
+#Produce dummy dataset of deer damage ####
+#Make incoming connectivity and forage quality strongly correlate with deer damage
+#Format: polygons, summed incoming connectivity, forage quality, alt forage
+
+#sum incoming connectivity by focal patch
+incoming_connectivity_sum <- Connectivity_table_filt %>%
+  select(focal_patch, incoming_connect) %>%
+  group_by(focal_patch) %>%
+  dplyr::summarise(total_connect = sum(incoming_connect),
+            n = n())
+
+#Add geometry
+incoming_connectivity_sum$geometry<-hab_patches$geometry[match(incoming_connectivity_sum$focal_patch, hab_patches$cluster)]
+
+#Generate random deer damage, forage Q and alternative forage values
+#Make forage Q positively correlated with deer damage, and alt forage negatively correlated
+library(MASS)
+
+# Set the number of samples
+n_samples <- 79
+
+# Define the means and standard deviations for each variable
+mean_FQ <- 50
+sd_FQ <- 20
+
+mean_AF <- 50
+sd_AF <- 20
+
+mean_DD <- 3
+sd_DD <- 1
+
+# Create a covariance matrix with the desired correlations
+cor_matrix <- matrix(c(1, -0.4, 0.8,
+                       -0.4, 1, 0,
+                       0.8, 0, 1), nrow = 3, byrow = TRUE)
+
+# Generate random data with the specified correlations
+set.seed(123)  # For reproducibility
+sim.data <- mvrnorm(n_samples, mu = c(mean_FQ, mean_AF, mean_DD), Sigma = cor_matrix)
+sim.data <- data.frame(round(sim.data))
+colnames(sim.data)[1] ="Forage_Q"
+colnames(sim.data)[2] ="Forage_Alt"
+colnames(sim.data)[3] ="Damage_score"
+
+#Stitch dataframes together
+
+test.df <- cbind(sim.data, incoming_connectivity_sum)
+
+saveRDS(test.df, "data/test.df.RDS")
+```
+
+```{r}
+# "Park it" code ###
+
+###################################
+if (param.table$g == "add") {
+    
+    
+    layer_stack <- as.numeric(substr(param.table$h[i],1,1))*land_use_layer +
+      as.numeric(substr(param.table$h[i],1,1))*road_layer + 
+         as.numeric(substr(param.table$h[i],1,1))*linear_feature_layer
+
+    
+    #add the layers together
+  } else {
+    #multiply the layers together
+ 
+    (as.numeric(substr(param.table$h[i],1,1))*land_use_layer) *
+      (as.numeric(substr(param.table$h[i],1,1))*road_layer) * 
+         (as.numeric(substr(param.table$h[i],1,1))*linear_feature_layer)   
+  }
+
+####################################
+#Use strings in param.table to find correct layers for each variable
+
+ land_cover_layer <- raster(paste0(here::here(),"/data/",param.table$tr[i],".tif"))
+
+ major_road_layer <- raster(paste0(here::here(),"/data/",param.table$e[i],".tif"))
+  
+ minor_road_layer <- raster(paste0(here::here(),"/data/",param.table$f[i],".tif"))
+
+ linear_layer <- raster(paste0(here::here(),"/data/",param.table$g[i],".tif"))
+ ####################################
+ #Use if else statements to read in raster layers
+
+for(i in 1:nrow(param.table)) {
+  
+  #LAND COVER
+  if(param.table$land.cover.inc[i] == 0) {
+    #land cover raster blank
+    land_cover_layer <- NULL 
+} else if (param.table$land.cover.inc[i] == 1) {
+  #Read in raster layer from param.table$tr
+  land_cover_layer <- raster(paste0(here::here(),"/data/",param.table$land_cover[i],".tif")) 
+} else #param.table$land.use.inc == 2
+  #Read in raster layer from param.table$tr
+  land_cover_layer <- raster(paste0(here::here(),"/data/",param.table$land_cover[i],".tif"))
+  #multiply raster by 2
+  land_cover_layer <- land_cover_layer*2
+  
+  #ROADS
+if(param.table$road.inc[i] == 0) {
+    #land cover raster blank
+    road_layer <- NULL 
+} else if (param.table$road.inc[i] == 1) {
+  #Read in raster layer
+  road_layer <- raster(paste0(here::here(),"/data/",param.table$road_layers[i],".tif")) 
+} else #param.table$minor.rd.inc == 2) 
+  #Read in raster layer
+  road_layer <- raster(paste0(here::here(),"/data/",param.table$road_layers[i],".tif"))
+  #multiply raster by 2
+  road_layer <- road_layer*2
+  
+  #LINEAR FEATURES
+  if(param.table$lf.inc[i] == 0) {
+    #land cover raster blank
+    road_layer <- NULL 
+} else if (param.table$lf.inc[i] == 1) {
+  #Read in raster layer
+  lf_layer <- raster(paste0(here::here(),"/data/",param.table$lf_layers[i],".tif")) 
+} else #param.table$minor.rd.inc == 2) 
+  #Read in raster layer
+  lf_layer <- raster(paste0(here::here(),"/data/",param.table$lf_layers[i],".tif"))
+  #multiply raster by 2
+  lf_layer <- lf_layer*2
+  
+}
+ ###########################
+  #have an option where layer is multiplied by 0 (not included)
+ #have column showing whether variable is included (road.inc = 0/1)
+  
+    layer_stack <- as.numeric(substr(param.table$h[i],1,1))*land_use_layer +
+      as.numeric(substr(param.table$h[i],2,2))*major_road_layer + 
+        as.numeric(substr(param.table$h[i],3,3))*minor_road_layer + 
+         as.numeric(substr(param.table$h[i],3,3))*linear_feature_layer
+ 
+ 
+    layer_brick <- brick(as.numeric(param.table$land.cover.inc[i])*land_cover_layer,
+      as.numeric(param.table$road.inc[i])*road_layer,
+         as.numeric(param.table$lf.inc[i])*lf_layer,
+            as.numeric(param.table$tri.inc[i])*tri_layer)    
+ ###########################
+    
+#remove NA's from table
+#Connectivity_table_filt <- all.dat %>%
+  #filter(!is.na(incoming_connect))
+#remove duplicated rows
+#Connectivity_table_filt <- Connectivity_table[!duplicated(Connectivity_table_filt),Connectivity_table_filt]
+  ##############################
+```
+
