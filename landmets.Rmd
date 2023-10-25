@@ -1,0 +1,354 @@
+---
+title: "LCM2015 landscapemetrics"
+output: html_notebook
+---
+
+This script will make buffers around the NFI sections, and estimate the % cover of different land uses, using the LCM2015 raster. Two tpes of buffers:
+1) circular, surrounding the NFI centroids
+2) cookie-cutter ones, that go from the edge of the sections - irregular shapes and sizes
+
+```{r setup}
+#libPaths("C:/R-Packages")#set library path
+rm(list = ls())#clear
+
+require("knitr")
+root.dir = "file:///C:/LocalData/NFI_Buffer_Project/NFI_R_Project" #set home directory
+
+knitr::opts_knit$set(root.dir = root.dir)
+knitr::opts_chunk$set(fig.width=8, fig.height=8, fig.path='Figs/', #set figure options
+                      echo=TRUE, warning=FALSE, message=FALSE)
+
+#write("TMPDIR = Desktop/TempDir" #set temporary data directory
+ #     , file=file.path(Sys.getenv('R_USER'), '.Renviron')) 
+```
+
+##Install or load packages and set up folders
+```{r packages, warning=FALSE, message=FALSE}
+#Packages
+package.list = c("raster", "sp", "sf", "tidyverse", "plyr",  "dplyr", "ggplot2", "fasterize", "units", "rgl", "rasterVis", "spatialEco", "reproducible", "viridis", "gridExtra")
+tmp.install = which(lapply(package.list, require, character.only = TRUE)==FALSE)
+if(length(tmp.install)>0) install.packages(package.list[tmp.install])
+lapply(package.list, require, character.only = TRUE)
+
+#Directories
+#Directories - create outputs and scratch folders if they don't already exist in the root directory
+ifelse(!dir.exists(file.path(root.dir, "Scratch")), dir.create(file.path(root.dir, "Scratch")), FALSE)
+ifelse(!dir.exists(file.path(root.dir, "Outputs")), dir.create(file.path(root.dir, "Outputs")), FALSE)
+```
+
+
+```{r spatial parameters}
+crs =27700 #coordinate system EPSG code (British National Grid = epsg:27700) 
+crs2 = "+init=epsg:27700"#coordinate system (British National Grid = "+init=epsg:27700")
+
+uk10k = sf::st_read("C:/LocalData/NFIBufferProject/Inputs/LUES_GIS/10km_grid/10km_grid/gbng/10km_grid_region.shp", crs = crs) %>% #path to home habitat vector (polygon) data
+  sf::st_transform(., crs) #make sure it is in correct coordinate system
+
+#Read in the sections
+sections = sf::st_read("C:/Local/Dropbox/BEAST_R/AW_buffer_data_share/sections_geodata/shapefile/NFI_sections.shp", crs = crs)
+  
+sections <- sections%>%
+  unite(SQUID_SECTION, SQUID,SECTION_LE, sep="_", remove = F)%>%#make unique id
+  mutate(YEAR= substring(ASSESSMENT,1,4))%>%
+  mutate(SECTION_AREA= SHAPE_Area)%>%
+  dplyr::select(SQUID_SECTION,YEAR, SQUID,SECTION_AREA)%>%
+  filter(YEAR<2016)#first NFI survey round was 2010-2015
+
+
+sections$nparts <- unlist(lapply(st_geometry(sf::st_as_sf(sections)), length))
+
+
+
+```
+
+
+```{r}
+#Merge multiparts together:
+sectionsx <- sections %>%
+   group_by(SQUID_SECTION)
+sectionsx <- st_cast(sectionsx, "MULTIPOINT") %>%
+st_convex_hull()
+
+plot(sections[sections$SQUID_SECTION=="95219_a",])
+plot(sectionsx[sectionsx$SQUID_SECTION=="95219_a",])
+
+lcm <- raster("C:/Local/Dropbox/BEAST_R/Inputs/LandUse_250/LandUse_250.tif")
+
+proj4string(lcm) = CRS("+init=epsg:27700") 
+#plot(lc)
+```
+
+
+At the moment, the thematic resolution of the land cover map is quite high, probably too high
+# Code to extract landscape metrics from buffers surrounding points and polygons
+
+
+```{r}
+
+library(landscapemetrics)
+# List of class level area metrics available
+list_lsm(level = "class", 
+         type = "area and edge metric", 
+         simplify = FALSE)
+
+# extract  area of each landscape class within each buffer 
+
+circle_area250 = sample_lsm(landscape = lc,   # Raster* Layer, Stack, Brick, SpatRaster (terra), stars, or a list of rasterLayers.
+                         y = st_centroid(sectionsx),        # 2-column matrix with coordinates, SpatialPoints, SpatialLines, SpatialPolygons, sf points or sf polygons.
+                         size = 250,              # Approximated size of sample plot. Equals the radius for circles or half of the side-length for squares in mapunits. For lines size equals the width of the buffer.
+                         plot_id = sectionsx$SQUID_SECTION, # Vector with id of sample points. If not provided, sample points will be labelled 1...n.
+                         what = "lsm_c_ca",             # Selected level of metrics: either "patch", "class" or "landscape". It is also possible to specify functions as a vector of strings, e.g. what = c("lsm_c_ca", "lsm_l_ta").
+                         # type = "diversity metric", 
+                         shape = "circle",
+                         # neighbourhood = 8,
+                         # level = landscape,
+                         consider_boundary= FALSE,
+                         count_boundary = FALSE,
+                         cell_center = FALSE,
+                         verbose = TRUE,
+                         progress = TRUE,
+                         return_raster = FALSE
+                         )
+
+print("DONE")
+#circle_area500=read.csv("circle_area500.csv",header=T, row.names = 1)
+write.csv(circle_area250, "circle_area250.csv")
+
+```
+```{r}
+circle_area500 = sample_lsm(landscape = lc,   # Raster* Layer, Stack, Brick, SpatRaster (terra), stars, or a list of rasterLayers.
+                         y = st_centroid(sectionsx),        # 2-column matrix with coordinates, SpatialPoints, SpatialLines, SpatialPolygons, sf points or sf polygons.
+                         size = 500,              # Approximated size of sample plot. Equals the radius for circles or half of the side-length for squares in mapunits. For lines size equals the width of the buffer.
+                         plot_id = sectionsx$SQUID_SECTION, # Vector with id of sample points. If not provided, sample points will be labelled 1...n.
+                         what = "lsm_c_ca",             # Selected level of metrics: either "patch", "class" or "landscape". It is also possible to specify functions as a vector of strings, e.g. what = c("lsm_c_ca", "lsm_l_ta").
+                         # type = "diversity metric", 
+                         shape = "circle",
+                         # neighbourhood = 8,
+                         # level = landscape,
+                         consider_boundary= FALSE,
+                         count_boundary = FALSE,
+                         cell_center = FALSE,
+                         verbose = TRUE,
+                         progress = TRUE,
+                         return_raster = FALSE
+                         )
+
+print("DONE")
+
+write.csv(circle_area500, "circle_area500.csv")
+```
+```{r}
+circle_area750 = sample_lsm(landscape = lc,   # Raster* Layer, Stack, Brick, SpatRaster (terra), stars, or a list of rasterLayers.
+                         y = st_centroid(sectionsx),        # 2-column matrix with coordinates, SpatialPoints, SpatialLines, SpatialPolygons, sf points or sf polygons.
+                         size = 750,              # Approximated size of sample plot. Equals the radius for circles or half of the side-length for squares in mapunits. For lines size equals the width of the buffer.
+                         plot_id = sectionsx$SQUID_SECTION, # Vector with id of sample points. If not provided, sample points will be labelled 1...n.
+                         what = "lsm_c_ca",             # Selected level of metrics: either "patch", "class" or "landscape". It is also possible to specify functions as a vector of strings, e.g. what = c("lsm_c_ca", "lsm_l_ta").
+                         # type = "diversity metric", 
+                         shape = "circle",
+                         # neighbourhood = 8,
+                         # level = landscape,
+                         consider_boundary= FALSE,
+                         count_boundary = FALSE,
+                         cell_center = FALSE,
+                         verbose = TRUE,
+                         progress = TRUE,
+                         return_raster = FALSE
+                         )
+
+print("DONE")
+
+write.csv(circle_area750, "circle_area750.csv")
+```
+
+```{r}
+circle_area100 = sample_lsm(landscape = lc,   # Raster* Layer, Stack, Brick, SpatRaster (terra), stars, or a list of rasterLayers.
+                         y = st_centroid(sectionsx),        # 2-column matrix with coordinates, SpatialPoints, SpatialLines, SpatialPolygons, sf points or sf polygons.
+                         size = 100,              # Approximated size of sample plot. Equals the radius for circles or half of the side-length for squares in mapunits. For lines size equals the width of the buffer.
+                         plot_id = sectionsx$SQUID_SECTION, # Vector with id of sample points. If not provided, sample points will be labelled 1...n.
+                         what = "lsm_c_ca",             # Selected level of metrics: either "patch", "class" or "landscape". It is also possible to specify functions as a vector of strings, e.g. what = c("lsm_c_ca", "lsm_l_ta").
+                         # type = "diversity metric", 
+                         shape = "circle",
+                         # neighbourhood = 8,
+                         # level = landscape,
+                         consider_boundary= FALSE,
+                         count_boundary = FALSE,
+                         cell_center = FALSE,
+                         verbose = TRUE,
+                         progress = TRUE,
+                         return_raster = FALSE
+                         )
+
+print("DONE")
+
+write.csv(circle_area100, "circle_area100.csv")
+```
+
+
+
+
+
+```{r}
+circle_area1k = sample_lsm(landscape = lc,   # Raster* Layer, Stack, Brick, SpatRaster (terra), stars, or a list of rasterLayers.
+                         y = st_centroid(sectionsx),        # 2-column matrix with coordinates, SpatialPoints, SpatialLines, SpatialPolygons, sf points or sf polygons.
+                         size = 1000,              # Approximated size of sample plot. Equals the radius for circles or half of the side-length for squares in mapunits. For lines size equals the width of the buffer.
+                         plot_id = sectionsx$SQUID_SECTION, # Vector with id of sample points. If not provided, sample points will be labelled 1...n.
+                         what = "lsm_c_ca",             # Selected level of metrics: either "patch", "class" or "landscape". It is also possible to specify functions as a vector of strings, e.g. what = c("lsm_c_ca", "lsm_l_ta").
+                         # type = "diversity metric", 
+                         shape = "circle",
+                         # neighbourhood = 8,
+                         # level = landscape,
+                         consider_boundary= FALSE,
+                         count_boundary = FALSE,
+                         cell_center = FALSE,
+                         verbose = TRUE,
+                         progress = TRUE,
+                         return_raster = FALSE
+                         )
+
+print("DONE")
+
+write.csv(circle_area1k, "circle_area1k.csv")
+```
+
+```{r}
+circle_area2k = sample_lsm(landscape = lc,   # Raster* Layer, Stack, Brick, SpatRaster (terra), stars, or a list of rasterLayers.
+                         y = st_centroid(sectionsx),        # 2-column matrix with coordinates, SpatialPoints, SpatialLines, SpatialPolygons, sf points or sf polygons.
+                         size = 2000,              # Approximated size of sample plot. Equals the radius for circles or half of the side-length for squares in mapunits. For lines size equals the width of the buffer.
+                         plot_id = sectionsx$SQUID_SECTION, # Vector with id of sample points. If not provided, sample points will be labelled 1...n.
+                         what = "lsm_c_ca",             # Selected level of metrics: either "patch", "class" or "landscape". It is also possible to specify functions as a vector of strings, e.g. what = c("lsm_c_ca", "lsm_l_ta").
+                         # type = "diversity metric", 
+                         shape = "circle",
+                         # neighbourhood = 8,
+                         # level = landscape,
+                         consider_boundary= FALSE,
+                         count_boundary = FALSE,
+                         cell_center = FALSE,
+                         verbose = TRUE,
+                         progress = TRUE,
+                         return_raster = FALSE
+                         )
+
+print("DONE")
+
+write.csv(circle_area2k, "circle_area2k.csv")
+```
+
+
+```{r}
+circle_area100$buffersize=100
+circle_area250$buffersize=250
+circle_area500$buffersize=500
+circle_area750$buffersize=750
+circle_area1k$buffersize=1000
+circle_area2k$buffersize=2000
+
+#convert to percentages, and account for different percentage_inside values
+circle_area100$perc=circle_area100$value/((pi*100^2)/1000000)*(circle_area100$percentage_inside/100)
+circle_area250$perc=circle_area250$value/((pi*250^2)/1000000)*(circle_area250$percentage_inside/100)
+circle_area500$perc=circle_area500$value/((pi*500^2)/1000000)*(circle_area500$percentage_inside/100)
+circle_area750$perc=circle_area750$value/((pi*750^2)/1000000)*(circle_area750$percentage_inside/100)
+circle_area1k$perc=circle_area1k$value/((pi*1000^2)/1000000)*(circle_area1k$percentage_inside/100)
+circle_area2k$perc=circle_area2k$value/(((pi*2000^2)/1000000)/(circle_area2k$percentage_inside/100))
+
+
+
+landmets <- rbind(circle_area100,circle_area250,circle_area500,circle_area750,circle_area1k,circle_area2k)
+#reclassify:
+
+landmets=landmets%>%
+  as.data.frame()%>%
+  mutate(SQUID_SECTION=plot_id)%>%
+  dplyr::select(SQUID_SECTION, class, metric, percentage_inside, buffersize,perc)%>%
+  mutate(landclass=recode(class, "1"="brdlv", "2"="conif", "3"="arab","4"="impgrass","5"="unimpgrass","6"="unimpgrass","7"="unimpgrass", "8"="bogfen", "9"="heath", "10"="heath","11"="bogfen","12"="rock","13"="water","14"="water","15"="rock","16"="rock","17"="rock","18"="rock", "19"="rock", "20"="urb", "21"="suburb"))%>%
+ dplyr:: select(SQUID_SECTION, landclass,buffersize,perc)
+
+
+landmets%>%
+  count("landclass")
+
+
+landmetsall <- landmets%>%
+  mutate(class_buff =paste(landclass, buffersize, sep="_"))%>%
+  dplyr::select(SQUID_SECTION, class_buff, perc)%>%
+  group_by(SQUID_SECTION, class_buff)%>%
+  dplyr::summarise(perc = sum(perc))%>%
+  spread(key=class_buff,value=perc, fill=0)
+
+
+
+
+#pairs(landmets500[,-1])
+
+write.csv(landmets,"C:/LocalData/NFI_Buffer_Project/NFI_R_Project/Outputs/landmets_longform_point.csv")
+write.csv(landmetsall,"C:/LocalData/NFI_Buffer_Project/NFI_R_Project/Outputs/landmets_wideform_point.csv")
+```
+                                                                                                                                             
+
+
+
+```{r}
+# function to calculate landscape metrics for buffers surrounding the section polygons
+
+POLY=as(sectionsx, "Spatial")
+veg = lc
+#ext<-raster::extract(lc, POLY, method='simple')
+#class(ext)  # a list
+## [1] "list"
+#length(ext) # three elements, a vector of land use values for each region
+## [1] 3
+
+
+polyFragStats <- function(POLY, radius, veg){
+  buff<-buffer(POLY, width = radius, dissolve = T) # buffer the section polygon
+  buffers<-erase(buff,POLY) # cut out the pond from the buffer, so get outer buffer only
+  fcrop <- crop(veg, buffers) # crop land cover map by the buffers
+  fmask <- mask(fcrop, buffers) # mask the crop
+  #plot(fmask);plot(POLY,add=T); plot(buffers, add=T)
+  res <- raster::extract(fmask, buffers, method="simple") # class statistics calculated
+  res<-as.data.frame(table(res))
+  res$SQUID_SECTION <- POLY$SQUID_SECTION # make sure the metrics are associated with the square id
+    res=res%>%
+    mutate(total_pix = as.numeric(sum(Freq)), class=res)%>%
+    select(SQUID_SECTION, class, Freq, total_pix)%>%
+    mutate(perc_cov=Freq*100/total_pix, buff_area=area(buffers))
+  return(res)
+}
+
+buffer_size <- c(100, 250,500,750,1000,2000) # set buffer sizes
+
+
+respoly <- ldply(buffer_size, function(j) {
+  ldply(1:length(POLY), function(i) {  # for each point
+    out <- polyFragStats(POLY[i,], radius=j, veg=veg) # compute fragstats metrics 
+    out$buffer_size <- j
+    return(out)
+  })  
+})
+
+```
+
+```{r}
+landmets.poly=respoly%>%
+  as.data.frame()%>%
+  dplyr::select(SQUID_SECTION, class, buffer_size,perc_cov)%>%
+  mutate(landclass=recode(class, "1"="brdlv", "2"="conif", "3"="arab","4"="impgrass","5"="unimpgrass","6"="unimpgrass","7"="unimpgrass", "8"="bogfen", "9"="heath", "10"="heath","11"="bogfen","12"="rock","13"="water","14"="water","15"="rock","16"="rock","17"="rock","18"="rock", "19"="rock", "20"="urb", "21"="suburb"),perc=perc_cov,buffersize=buffer_size)%>%
+ dplyr:: select(SQUID_SECTION, landclass,buffersize,perc)
+
+landmetsall.poly <- landmets.poly%>%
+  mutate(class_buff =paste(landclass, buffersize, sep="_"))%>%
+  dplyr::select(SQUID_SECTION, class_buff, perc)%>%
+  group_by(SQUID_SECTION, class_buff)%>%
+  dplyr::summarise(perc = sum(perc))%>%
+  spread(key=class_buff,value=perc, fill=0)
+
+landmets.poly
+
+
+write.csv(landmets.poly,"C:/LocalData/NFI_Buffer_Project/NFI_R_Project/Outputs/landmets_longform_poly.csv")
+write.csv(landmetsall.poly,"C:/LocalData/NFI_Buffer_Project/NFI_R_Project/Outputs/landmets_wideform_poly.csv")
+```
+
+```{r}
+
+```
+
