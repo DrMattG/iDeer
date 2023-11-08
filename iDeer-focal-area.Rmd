@@ -1,0 +1,803 @@
+---
+title: "iDeer-focal-area"
+author: "Amy Gresham"
+date: "2023-10-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+root.dir = "~/Spatial datasets/iDeer" #set home directory
+
+```
+##Install or load packages and set up folders
+```{r packages, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+#Packages
+package.list = c("raster", "sp", "sf", "tidyverse", "plyr",  "dplyr", "ggplot2", "fasterize", "units", "rgl", "rasterVis", "spatialEco", "reproducible", "viridis", "gridExtra","rgdal")
+tmp.install = which(lapply(package.list, require, character.only = TRUE)==FALSE)
+if(length(tmp.install)>0) install.packages(package.list[tmp.install])
+lapply(package.list, require, character.only = TRUE)
+
+#Directories
+#Directories - create outputs and scratch folders if they don't already exist in the root directory
+ifelse(!dir.exists(file.path(root.dir, "Scratch")), dir.create(file.path(root.dir, "Scratch")), FALSE)
+ifelse(!dir.exists(file.path(root.dir, "Outputs")), dir.create(file.path(root.dir, "Outputs")), FALSE)
+```
+#This code brings together the connectivity, alternative forage and forage quality 
+#1 select focal area within a 25m raster (use land cover raster)
+#2 buffer the focal area
+#3 crop input rasters to focal area
+#4 make resistance surface for focal.area.buffer
+#5 Rasterize connectivity layer
+#6 Extract connectivity raster to point
+#7 Convert forage quality raster to points
+#8 Extract landscape metrics for each focal point
+
+
+```{r}
+
+crs =27700 #coordinate system EPSG code (British National Grid = epsg:27700) 
+crs2 = "+init=epsg:27700"#coordinate system (British National Grid = "+init=epsg:27700")
+
+#1 select focal area within a 25m raster (use land cover raster) ####
+
+#import land cover raster
+
+lcm.rast <- raster::raster("C:/Users/ik929086/OneDrive - University of Reading/Documents/Spatial datasets/Land use/land_use_2021/data/gblcm25m2021.tif")
+crs(lcm.rast) <- crs
+
+#select focal area
+#in the tool, user will zoom to their property/area of interest
+#for this example we will crop the point dataset to a 100km area using BNG square "NY", covers most of Lake District
+
+#uk100k
+uk100k <-sf::st_read(dsn = "C:/Users/ik929086/OneDrive - University of Reading/Documents/Spatial datasets/os_bng_grids.gpkg", layer = "100km_grid")
+
+NY <- subset(uk100k, tile_name == "NY")
+
+lcm.NY <- crop(lcm.rast, extent(NY))
+
+#select a 10km area within the NY square
+
+#uk10k
+uk10k <-sf::st_read(dsn = "C:/Users/ik929086/OneDrive - University of Reading/Documents/Spatial datasets/os_bng_grids.gpkg", layer = "10km_grid")
+
+NY54 <- subset(uk10k, tile_name == "NY54")
+
+lcm.NY54 <- crop(lcm.NY, extent(NY54))
+plot(lcm.NY54)
+
+#convert to points
+
+#focal.points <- rasterToPoints(lcm.NY54, spatial = TRUE)
+focal.points <- rasterToPoints(lcm.NY54, spatial = TRUE)
+#convert to spatial object
+focal.points <- st_as_sf(focal.points, crs)
+plot(focal.points)
+#get unique id for each point
+focal.points$uniqueforID <- paste("for",focal.points$geometry,sep="_")
+
+```
+
+```{r echo = FALSE}
+#2 Buffer the focal area
+
+#In this case we are buffering the NY54 tile
+
+focal.area.buffer <- st_buffer(NY54,(20000)) # add 20k buffer to tile to avoid edge effects when doing moving window
+#plot 10km square and buffer
+#jpeg("Outputs/BNG_NY54_20km_buffer.jpeg", width = 6, height = 6, units = "in", res = 300, quality = 100)
+plot(lcm.NY)
+plot(focal.area.buffer, col = "transparent",border = "blue", add = TRUE)
+plot(NY54$geom, border = "red", add = TRUE)
+plot(focal.points, add = TRUE)
+#dev.off()
+
+#FOR TESTING:
+
+#focal.area.buffer.rast <- raster::rasterize(focal.area.buffer, lcm.NY)
+#focal.area.buffer.rast <- crop(focal.area.buffer.rast, focal.area.buffer)
+#focal.area.buffer.points <- rasterToPoints(focal.area.buffer.rast, spatial=TRUE)
+#focal.area.buffer.points <- st_as_sf(focal.area.buffer.points)
+#focal.area.buffer.points$uniqueforID <- paste("for",focal.area.buffer.points$geometry,sep="_") # add unique_ID
+
+
+```
+
+
+```{r}
+#3 Crop all input layers to focal.area.buffer
+
+#MAKE EXAMPLE LAYERS ####
+
+#Random values for forage quality and alternative forage
+#In the future this will be formed by expert opinion
+#Using random values for examples
+#Reclassify land use raster
+
+#Land class thematic res options
+#As an example: value 20 becomes 2
+themres1_vals <- data.frame(is = 1:21, becomes = c(1:21))
+themres2_vals <- data.frame(is = 1:21, becomes = c(1:20,2))
+
+set.seed(123)
+range = c(1:10)
+#Forage quality
+fq <- sample(range, 21, replace = TRUE)
+forage_quality <- data.frame(is = 1:21, becomes = fq)
+#Alternative forage
+altf <- sample(range, 21, replace = TRUE)
+alt_forage <- data.frame(is = 1:21, becomes = altf)
+
+#Reclassify lc thematic res
+themres1 <- reclassify(lcm.NY, themres1_vals)
+themres2 <- reclassify(lcm.NY, themres2_vals)
+#Reclassify lc for forage quality
+forage_q_rast <- reclassify(lcm.NY, forage_quality)
+#Reclassify lc for alternative forage
+alt_forage_rast <- reclassify(lcm.NY, alt_forage)
+
+#Import road layers
+
+motorways <- raster("C:/Users/ik929086/OneDrive - University of Reading/Documents/Spatial datasets/iDeer/data/UK_motorways_raster.tif")
+crs(motorways) <- crs
+#reclassify so motorway = 1
+road_vals <-data.frame(is = c(0,1), becomes = c(1,0))
+motorways <- reclassify(motorways,road_vals)
+
+A_roads <- raster("C:/Users/ik929086/OneDrive - University of Reading/Documents/Spatial datasets/iDeer/data/UK_A_roads_raster_5m.tif")
+crs(A_roads) <- crs
+
+#Import linear features
+
+lf <- raster("C:/Users/ik929086/OneDrive - University of Reading/Documents/Spatial datasets/iDeer/data/lf_25m_EW.tif")
+crs(lf) <- crs
+
+#Import slope
+
+slope <- raster("C:/Users/ik929086/OneDrive - University of Reading/Documents/Spatial datasets/iDeer/data/slope_25m_EW.tif")
+crs(slope) <- crs
+
+#crop raster layers to focal.area.buffer ####
+themres1.focal.area.buffer <- crop(themres1, extent(focal.area.buffer))
+themres2.focal.area.buffer <- projectRaster(themres2, themres1)
+#For forage quality, just use focal area, not buffer
+#No spatial processes involved
+forage.q.focal.area <- projectRaster(forage_q_rast, lcm.NY54)
+#Use focal area + buffer for alternative forage
+alt.forage.focal.area.buffer <- projectRaster(alt_forage_rast, themres1)
+motorways.focal.area.buffer <- projectRaster(motorways, themres1)
+lf.focal.area.buffer <- projectRaster(lf, themres1)
+slope.focal.area.buffer <- projectRaster(slope, themres1)
+A.roads.focal.area.buffer <- projectRaster(A.roads.focal, themres1)
+#reclassify so A road = 1 ,takes less time on small area
+A.roads.focal.area.buffer <- reclassify(A.roads.focal,road_vals)
+
+writeRaster(themres1.focal.area.buffer, "data/themres1_NY54_20k_buffer.tif",overwrite=TRUE)
+writeRaster(themres2.focal.area.buffer, "data/themres2_NY54_20k_buffer.tif",overwrite=TRUE)
+writeRaster(forage.q.focal.area, "data/forage_q_NY54.tif",overwrite=TRUE)
+writeRaster(alt.forage.focal.area.buffer, "data/alt.forage_NY54_20k_buffer.tif",overwrite=TRUE)
+writeRaster(motorways.focal.area.buffer, "data/motorways_NY54_20k_buffer.tif",overwrite=TRUE)
+writeRaster(A.roads.focal.area.buffer, "data/A_roads_NY54_20k_buffer.tif",overwrite=TRUE)
+writeRaster(lf.focal.area.buffer, "data/linear_features_NY54_20k_buffer.tif",overwrite=TRUE)
+writeRaster(slope.focal.area.buffer, "data/slope_NY54_20k_buffer.tif",overwrite=TRUE)
+
+themres1_NY54_20k_buffer <- raster("data/themres1_NY54_20k_buffer.tif")
+crs(themres1_NY54_20k_buffer) <- crs
+themres2_NY54_20k_buffer <- raster("data/themres2_NY54_20k_buffer.tif")
+crs(themres2_NY54_20k_buffer) <- crs
+motorways_NY54_20k_buffer <- raster("data/motorways_NY54_20k_buffer.tif")
+crs(motorways_NY54_20k_buffer) <- crs
+A_roads_NY54_20k_buffer <- raster("data/A_roads_NY54_20k_buffer.tif")
+crs(A_roads_NY54_20k_buffer) <- crs
+slope_NY54_20k_buffer <- raster("data/slope_NY54_20k_buffer.tif")
+crs(slope_NY54_20k_buffer) <- crs
+alt.forage.focal.area.buffer <- raster("data/alt.forage_NY54_20k_buffer.tif")
+crs(alt.forage.focal.area.buffer) <- crs
+forage.q.focal.area <- raster("data/forage_q_NY54.tif")
+crs(forage.q.focal.area) <- crs
+```
+
+```{r}
+#Read in NFI data ####
+
+nfi <- st_read("C:/Users/ik929086/OneDrive - University of Reading/Documents/Spatial datasets/NFI GB/National_Forest_Inventory_Woodland_GB_2020.shp")
+st_crs(nfi) <- crs
+
+#filter original shapefile to keep only polygons that intersect with focal buffer
+subset_nfi <- st_filter(nfi, focal.area.buffer)
+
+#To practice the rastertopoints, select for a subset within the 10k square ###
+#NOT DOING THIS FOR THE REAL THING
+
+subset_nfi <- st_filter(subset_nfi, NY54)
+
+#select for woodlands only
+ifts <- unique(nfi$IFT_IOA)
+ifts <- ifts[c(12,13,14,19,20,21,22,23,24)]
+ifts
+wood <- subset_nfi%>%filter(IFT_IOA %in% ifts)
+wood$wood <- 1
+
+#Merge intersecting polygons ####
+
+#convert multipolygons into polygons
+hab_patches_poly <- st_cast(wood, "MULTIPOLYGON") %>% st_cast("POLYGON")
+
+#change patch_ID and rownames so each is unique once again
+hab_patches_poly$patch_ID <- 1:nrow(hab_patches_poly)
+rownames(hab_patches_poly)<-hab_patches_poly$patch_ID
+
+#make true/false matrix of intersecting polygons
+inter <- as.matrix(st_intersects(hab_patches_poly))
+row.names(inter) <- hab_patches_poly$patch_ID
+colnames(inter) <- hab_patches_poly$patch_ID
+#make membership list
+clusters <- igraph::components(igraph::graph.adjacency(inter, mode = "undirected"))
+# Assign cluster IDs to the original sf object
+hab_patches_poly$cluster <- clusters$membership
+#Calculate cluster area
+hab_patches_clust <- hab_patches_poly %>%
+  mutate(cluster_area= map_dbl(cluster,  ~ sum(Area_ha[.])))
+
+#Dissolve polygons that share clusters
+
+hab_patches_intersect <- hab_patches_poly %>%
+  group_by(cluster) %>%
+  dplyr::summarise(cluster_area = sum(Area_ha),
+                   n = n())
+
+#Plot dissolved polygons
+ggplot(data = hab_patches_intersect) +
+  geom_sf(data = NY54, aes(fill = "Background"), alpha = 0.5) +  # Make the background translucent
+  geom_sf(data = hab_patches_intersect, aes(fill = factor(cluster))) +
+  scale_fill_manual(values = c("Background" = "lightgray"), guide = "none") +  # Set the fill color for the background
+  theme(legend.position = "none")
+
+#Mask linear features that intersect woodland polygons ####
+#Any value = 1 changes to 0 if it intersects a polygon
+#lf_masked <- mask(lf.focal.area.buffer, hab_patches_intersect, inverse = T)
+par(mfrow = c(1,2))
+plot(lf.focal.area.buffer)
+plot(lf_masked)
+writeRaster(lf_masked, "data/linear_features_no_intersecting_woodlands_NY54_20k_buffer.tif",overwrite=TRUE)
+
+linear_features_no_intersecting_woodlands_NY54_20k_buffer <- raster("data/linear_features_no_intersecting_woodlands_NY54_20k_buffer.tif")
+
+```
+
+
+```{r}
+#4a Make the parameter.table that will store all the layers used for making transition layer for focal.area.buffer
+
+#pd is the dispersal kernel  - two options 90, 95
+#md is the maximum dispersal distance - three options (5, 10, 15 k)
+#tr is the habitat raster - which is used as input into the resistance surface layer. We will start with two alternative options, which might correspond to two alternative rankings offered by our experts. themres1 and themres2
+#road_layers is the road layer thematic resolution
+#lf_layers is whether linear features are included (hedges) - present/absent
+
+#Q - how to get rid of redundant rows??? ####
+
+#percentage dispersers - 95% or 90%
+pd <- c(0.05, 0.10)
+
+#max dispersal distance - 5km, 10km, 15km, 20km
+md <- c(5000/25, 10000/25, 15000/25, 20000/25)
+
+#relative weightings
+#make all combinations of 0, 1 and 2 for presence/absence and 2x of three variables
+wts <- tidyr::crossing(var1 = 0:2, var2 = 0:2, var3 = 0:2, var4 = 0:2)
+
+#collapse columns into 1 column
+wts <- paste(wts$var1, wts$var2, wts$var3, wts$var4, sep = "")
+
+#var 1
+#thematic res for land cover
+tr <- c("themres1_NY54_20k_buffer", "themres2_NY54_20k_buffer") # set these manually
+
+#var 2
+#roads
+road_layers <- c("motorways_NY54_20k_buffer","A_roads_NY54_20k_buffer")
+
+#var 3
+#layer names for linear features
+lf_layers <- c("linear_features_no_intersecting_woodlands_NY54_20k_buffer")
+
+#var 4
+#layer name for slope
+slope_layers <- c("slope_NY54_20k_buffer")
+
+#Make parameter table for creating transition layers ####
+param.table <- expand.grid(wts,tr, road_layers, lf_layers, slope_layers)
+names(param.table) <- c("wts","land_cover","road_layers","lf_layers", "slope_layers")
+
+#create columns in param.table showing whether each variable is left out (0), included (1), or doubled (2)
+
+#rivers  
+#param.table <- param.table %>% mutate(river.inc = substr(param.table$g,1,1))
+
+#land cover
+param.table <- param.table %>% mutate(land.cover.inc = substr(param.table$wts,1,1))
+param.table$land.cover.inc <- as.numeric(param.table$land.cover.inc)
+
+#roads
+param.table <- param.table %>% mutate(road.inc = substr(param.table$wts,2,2))
+param.table$road.inc <- as.numeric(param.table$road.inc)
+
+#minor roads
+#param.table <- param.table %>% mutate(minor.rd.inc = substr(param.table$wts,3,3))
+
+#linear features
+param.table <- param.table %>% mutate(lf.inc = substr(param.table$wts,3,3))
+param.table$lf.inc <- as.numeric(param.table$lf.inc)
+
+#slope
+param.table <- param.table %>% mutate(slope.inc = substr(param.table$wts,4,4))
+param.table$slope.inc <- as.numeric(param.table$slope.inc)
+
+#Remove rows which contain all zeros (0000) as cannot test empty transition layer
+#NO POINT IN TESTING EMPTY TRANSITION LAYER (0000), just test layers than contain at least one variable
+
+param.table <- param.table[!grepl("0000", param.table$wts),]
+
+#Get unique row ID
+
+param.table$combo_id = 1:nrow(param.table)
+
+param.table 
+
+#Dispersal kernel parameters ####
+#make parameter table containing just dispersal kernel parameters
+params.kernel <- expand.grid(pd,md)
+names(params.kernel) <- c("pd","md")
+#remove duplicates
+params.kernel <- params.kernel[!duplicated(params.kernel),]
+
+```
+
+```{r}
+#4b Make the resistance surface for focal.area.buffer
+
+#function for looping through parameter table combinations:
+
+#createtransitionfunc <- function(param.table) {
+  
+#Make empty list of transition layers 
+
+all.tr.layers <- list()
+
+#loop over layer combinations in param.table
+  
+  for (i in 1:nrow(param.table[1:5,])) {
+
+  # Load the raster layers based on conditions
+    
+    #instead of loading rasters, reassign based on strings in param.table
+   # will probably have a single layer with different weightings instead
+    
+  land_cover_layer <- get(paste0(param.table$land_cover[i]))
+
+  road_layer <- get(paste0(param.table$road_layers[i]))
+  
+  lf_layer <- get(paste0(param.table$lf_layers[i]))
+  
+  slope_layer <- get(paste0(param.table$slope_layers[i]))
+  
+  #multiply layers by value in .inc columns (0, 1 or 2)
+  #ALL RASTERS NEED TO HAVE SAME PROJECTION AND EXTENT
+
+  land_cover_val <- as.numeric(param.table$land.cover.inc[i])*land_cover_layer
+  road_val <- as.numeric(param.table$road.inc[i])*road_layer
+  lf_val <- as.numeric(param.table$lf.inc[i])*lf_layer
+  slope_val <- as.numeric(param.table$slope.inc[i])*slope_layer
+  
+  
+  #create transition layers
+  lc.cost <- gdistance::transition(land_cover_val, transitionFunction = mean, directions = 8)
+  road.cost <- gdistance::transition(road_val, transitionFunction = mean, directions = 8)
+  lf.cost <- gdistance::transition(lf_val, transitionFunction = mean, directions = 8)
+  slope.cost <- gdistance::transition(slope_val, transitionFunction = mean, directions = 8)
+
+  #Add layers together to create final transition layer
+  transition_lyr <- lc.cost + road.cost + lf.cost + slope.cost
+  
+  #store transition layer in list
+  
+    all.tr.layers[[i]] <-  transition_lyr
+  
+  #ID objects in list by combo_id
+for (j in seq_along(all.tr.layers)) {
+  if (j <= nrow(param.table)) {
+    all.tr.layers[[j]]@title <- as.character(param.table$combo_id[j])
+        }
+     }
+
+   }
+  
+ #}
+
+#createtransitionfunc(param.table)
+
+saveRDS(all.tr.layers, "./Outputs/tr.layers.1to5.test.rds")
+all.tr.layers <- readRDS("./Outputs/tr.layers.1to5.test.rds")
+```
+
+```{r}
+
+#5a CALCULATE CONNECTIVITY USING LEAST-COST DISTANCE ####
+
+#This is using points, NOT polygons
+#Points used by costDistance function
+
+#investigate barriers in transition layers - how to combine with continuous layers??
+
+# Buffer distance represents the cut off - this stops the script measuring every pairwise combination
+dispersal_cutoff <- 0.999 ### 99.9% cut off
+
+#Get resolution of raster cells
+cellres = res(lcm.NY)[[1]]
+
+#create an empty list of all the param.tables combos
+param.list = list()
+
+# Initialize a counter for row IDs
+row_id <- 1
+
+# loop through list #
+
+for (k in 1:length(all.tr.layers[1])) { #Transition layer = k
+  
+    for(j in 1:nrow(params.kernel[1])) { #Dispersal kernel parameters (max dispersal distance and % dispersers) = j
+      
+    # Initialize an empty list to store results for the current combination of k and j
+    result_list <- list()
+
+            for (i in 1:nrow(hab_patches_intersect[1:10,])) { #Woodland patch = i
+    
+  
+  #calculate dispersal contribution
+  dispersal_contribution <-
+  -((log(1 / params.kernel$pd[j])) / params.kernel$md[j]) # pd is % dispersers, md is buffer size
+  
+  #buffer cutoff
+  buffer_cutoff <- round(log(1 / (1 - dispersal_cutoff)) / (log(1 / params.kernel$pd[j]) /
+                                             params.kernel$md[j]), digits = 2)
+
+   # id single patch to measure from
+  focal_patch <- hab_patches_intersect[i,]
+  
+  # id patches to measure to
+  # buffer from selected focal patch by bufferDistance
+  #creates buffer by 11.53 units (red line)
+  focal_patch_buffer <- st_buffer(focal_patch, buffer_cutoff)
+  # select source patches within buffer distance of focal patch
+  source_patch <- st_filter(hab_patches_intersect, focal_patch_buffer, .predicate =st_intersects)
+  #get centroids of focal patch ###
+  focal_centroid <- st_centroid(st_geometry(focal_patch)) %>%
+  #make sure crs is bng
+  st_transform(., crs) %>%
+  # centroid geometry
+  st_geometry()
+  #make sp object
+  focal_centroid <- as(focal_centroid,"Spatial")
+  #get centroid of source patch ###
+  source_centroid <- st_centroid(st_geometry(source_patch)) %>%
+  #make sure crs is bng
+  st_transform(., crs) %>%
+  # centroid geometry
+  st_geometry()
+  #make spatial object
+  source_centroid <- as(source_centroid,"Spatial")
+  #make df to store least cost values
+  lc_df <- data.frame(lc_dist = numeric(length(source_centroid)))
+  lc_df_length = as.numeric(nrow(lc_df))
+  # Calculate least-cost distances between centroids
+  for (z in 1:lc_df_length) { 
+    lc_dist <- as.vector(gdistance::costDistance(all.tr.layers[[k]], focal_centroid, source_centroid[z]))
+    lc_df$lc_dist[z] <- lc_dist
+  }
+  # create a data frame with all information in
+  Conn_table_site <- data.frame(focal_patch = focal_patch$cluster,
+                                focal_patch_area = focal_patch$cluster_area,
+                                source_patch = source_patch$cluster, 
+                                source_patch_area = source_patch$cluster_area,
+                                lc_dist = lc_df$lc_dist,
+                                buffer = params.kernel$md[j],
+                                perc.disp = params.kernel$pd[j],
+                                tr.layer = all.tr.layers[[k]]@title) %>%
+    mutate(lc_distfin = lc_dist/cellres) %>%
+    mutate(lc_distfin = as.numeric(lc_distfin)) %>%
+    ### Calculate interconnectivity value
+    mutate(coninter = (exp(-((log(1/params.kernel$pd[j]))/params.kernel$md[j])*lc_distfin)*(focal_patch_area^2))) %>%
+    ### Calculate incoming connectivity
+    mutate(incoming_connect = case_when(focal_patch == source_patch ~ NA_real_,
+                                        TRUE ~ source_patch_area * exp(dispersal_contribution*lc_distfin)))
+  
+    #Create final dataframe containing the intra and inter-patch connectivity
+  
+  result_list[[i]] <- dfin <- data.frame(focal_id = focal_patch$cluster,
+                     focal_patch_area = as.numeric(focal_patch$cluster_area),
+                     source_id = source_patch$cluster, 
+                     source_patch_area = as.numeric(source_patch$cluster_area),
+                     buffer = Conn_table_site$buffer,
+                     perc.disp = Conn_table_site$perc.disp, 
+                     tr.layer = Conn_table_site$tr.layer,
+                     lc_distfin = Conn_table_site$lc_distfin, 
+                     coninter = sum(Conn_table_site$coninter), 
+                     conintra = ((Conn_table_site$focal_patch_area^2)*(Conn_table_site$focal_patch_area^2)*1),
+                     incoming_connect = Conn_table_site$incoming_connect,
+                     comp = sum(Conn_table_site$focal_patch_area^2)) %>%
+                     mutate(compN = comp/(sum(Conn_table_site$focal_patch_area)^2), 
+                     configN = coninter/(sum(Conn_table_site$focal_patch_area)^2)) %>%
+                     mutate(philcont = coninter*Conn_table_site$focal_patch_area^2)
+  
+            }
+    
+     # Combine all results for the current combination of k and j
+    combined_results <- do.call(rbind, result_list)
+  
+ #  if(i == 1) {
+ #   Connectivity_table = dfin
+  #} else {
+  #  Connectivity_table = rbind(Connectivity_table, dfin)
+ # }
+#param.list[[j]] <-  Connectivity_table
+
+param.list[[row_id]] <- combined_results
+
+# Increment the row_id counter
+    row_id <- row_id + 1
+
+ }
+
+}
+#all.dat.lc <- bind_rows(param.list)
+
+all.dat.lc <- do.call(rbind, param.list)
+
+#remove rows where focal id = source id
+all.dat.lc <- all.dat.lc[all.dat.lc$focal_id != all.dat.lc$source_id, ]
+
+#increment row names from 1
+
+rownames(all.dat.lc) <- 1:nrow(all.dat.lc)
+
+saveRDS(all.dat.lc, "./Outputs/least.cost.NY54.test.rds")
+all.dat.lc <- readRDS("./Outputs/least.cost.NY54.test.rds")
+```
+
+```{r}
+
+#5b Summarise connectivity data ####
+
+#subset connectivity data by chosen buffer size and chosen dispersal kernel parameters
+#need to test connectivity data against damage data to decide on best one
+#for now select 800 buffer and 95% dispersal kernel
+
+lc_subset <- all.dat.lc %>% filter(buffer == 800, perc.disp == 0.05)
+                            
+#sum metrics by focal patch
+connect_sum_lc <- lc_subset %>%
+  select(focal_id, coninter, conintra, incoming_connect) %>%
+  group_by(focal_id) %>%
+  dplyr::summarise(total_coninter = sum(coninter),
+                   total_conintra = sum(conintra),
+                   total_incoming = sum(incoming_connect),
+                   n = n())
+
+#Add geometry
+connect_sum_lc$geometry<-hab_patches_intersect$geometry[match(connect_sum_lc$focal_id, hab_patches_intersect$cluster)]
+connect_sum_lc <- st_as_sf(connect_sum_lc)
+
+#Plot incoming connectivity
+
+ggplot(data = connect_sum_lc$geometry) +
+  geom_sf(aes(fill = (connect_sum_lc$total_incoming)), size = 0.2) +
+  scale_fill_viridis_c(option = "inferno", name = "Incoming connectivity")
+
+#5 Rasterize incoming connectivity ####
+#Use land cover raster as template
+
+connect_sum_lc_rast <- raster::rasterize(connect_sum_lc,lcm.NY54, field = "total_incoming")
+crs(connect_sum_lc_rast) <- crs
+
+#Extract connectivity values of focal.points ####
+#focal.points = land cover raster converted to points
+
+#focal.points.connect <- focal.points[,-1]
+#convert connectivity raster to points
+connect.rast.points <- rasterToPoints(connect_sum_lc_rast, spatial = TRUE)
+#convert to spatial object
+connect.rast.points <- st_as_sf(connect.rast.points, crs)
+#rename column
+colnames(connect.rast.points)[1] <- "incoming_connect"
+#get unique id for each point
+connect.rast.points$uniqueforID <- paste("for",connect.rast.points$geometry,sep="_")
+
+#plot the converted connectivity values as points
+ggplot() +
+  geom_sf(data = NY54, aes(fill = "NY54 BNG Tile"), alpha = 0.5) +
+  geom_sf(data = connect.rast.points, aes(color = incoming_connect), size = 1) +
+  scale_color_gradient(low = "blue", high = "red")
+  #theme(legend.position = "none")
+
+#merge
+focal.points <- focal.points %>%
+  st_join(connect.rast.points %>% select(incoming_connect), by = "uniqueforID")
+
+#Extract values
+#Not working well, duplicating columns
+#focal.points$incoming_connect <- raster::extract(connect_sum_lc_rast,focal.points, method = "simple",df=TRUE)#extract
+
+#7 convert forage quality raster to points and extract values ####
+#No landscape process involved, just for focal area (NY54 tile)
+
+forage.rast.points <- rasterToPoints(forage.q.focal.area, spatial = TRUE)
+#convert to spatial object
+forage.rast.points <- st_as_sf(forage.rast.points, crs)
+#rename column
+colnames(forage.rast.points)[1] <- "forage.quality"
+#get unique id for each point
+forage.rast.points$uniqueforID <- paste("for",forage.rast.points$geometry,sep="_")
+#merge
+focal.points <- focal.points %>%
+  st_join(forage.rast.points %>% select(forage.quality), by = "uniqueforID")
+
+#Plot the forage quality values as points
+ggplot() +
+  geom_sf(data = focal.points, aes(color = forage.quality), size = 1) +
+  scale_color_gradient(low = "brown", high = "green")
+  #theme(legend.position = "none")
+
+
+``` 
+
+```{r}
+#8 calculate landscape metrics for buffers around each focal point ####
+
+#create list showing land cover associated with each lcm value
+
+land_cover_names <- data.frame(class = 1:21,
+                               lc_category = c("Broadleaf woodland", "Coniferous woodland","Arable","Improved grassland", "Neutral grassland","Calcareous grassland",
+                                               "Acid grassland","Fen","Heather","Heather grassland","Bog","Inland rock","Saltwater","Freshwater","Supralittoral rock",
+                                               "Supralittoral sediment","Littoral rock",
+                                               "Littoral sediment","Saltmarsh","Urban","Suburban")
+                               )
+
+
+#create 2-column matrix containing focal points
+focal.points.lm <- subset(focal.points[,2,5])
+focal.points.lm <- st_as_sf(focal.points.lm, crs)
+#Take a random subsample of the focal.points for testing
+set.seed(123)
+focal.points.lm <- sample_n(focal.points.lm, size = 20, replace = FALSE)
+plot_id = as.vector(focal.points.lm$uniqueforID)
+
+# function to calculate landscape metrics for buffers surrounding the focal points ####
+
+#POLY=as(focal.points.lm, "Spatial")
+POLY=as(focal.points.lm, "sf")
+st_crs(POLY) <- crs
+#convert points to polygons
+point_poly <- 25
+POLY <- st_buffer(POLY, dist = point_poly)
+veg = lcm.NY
+crs(veg) <- crs
+
+#radius = 500
+
+polyFragStats <- function(POLY, radius, veg){
+  buff<-st_buffer(POLY, dist = radius) # buffer the section polygon
+  #buff<-buffer(POLY, dist = radius, dissolve = T) # buffer the section polygon
+  st_crs(buff) <- crs
+  buffers <- sf::st_intersection(buff,POLY, dissolve = T) # remove section polygon from buffer
+  #remove column 2
+  buffers <- buffers[,-2]
+  #buffers<-raster::erase(buff,POLY) # cut out the pond from the buffer, so get outer buffer only
+  fcrop <- crop(veg, buff) # crop land cover map by the buffers
+  fmask <- mask(fcrop, buff) # mask the crop
+  plot(fmask);plot(POLY,add=T, col = "black")
+  fmask_POLY <- mask(fmask, POLY, inverse = T) # mask the crop
+  plot(fmask_POLY)
+  res <- raster::extract(fmask_POLY, buff, method="simple") # class statistics calculated
+  #Add unique point ID to each list element
+  names(res) <- buff$uniqueforID
+  # Create an empty data frame to store the results
+  res_df <- data.frame(uniqueforID = character(0), Value = integer(0), Freq = integer(0)) # create empty dataframe
+  # Calculate the table for each list element
+  for (i in seq_along(res)) {
+  table_i <- table(res[[i]])
+  res_df <- rbind(res_df, data.frame(uniqueforID = as.character(names(res)[[i]]), Value = as.integer(names(table_i)), Freq = as.integer(table_i)))
+  }
+  #Add geometry
+  res_df <- merge(res_df, buffers, by = "uniqueforID")
+  res_df$tile_name <- focal.area.buffer$tile_name # make sure the metrics are associated with the square id
+    total.pix.buffer=res_df %>%
+    group_by(uniqueforID) %>%
+    dplyr::summarise(
+    total_pix = as.numeric(sum(Freq))) %>%
+    ungroup()
+    
+#Merge total_pix into res_df
+  res_df <- merge(res_df, total.pix.buffer, by = "uniqueforID")
+    
+  #Calculate percentage cover of land cover classes inside buffers  
+  res_df <- res_df %>% 
+    mutate(class = Value) %>%
+    group_by(class, uniqueforID) %>%
+    dplyr::summarise(
+    Freq = Freq,
+    total_pix = total_pix,
+    perc_cov = sum(Freq * 100 / total_pix),
+    buff_area = sum(st_area(geometry)),
+    n = n(),
+    .groups = "drop"
+    )
+  
+  #Add land cover names
+
+land_cover_names$class <- as.factor(land_cover_names$class)
+res_df$class <- as.factor(res_df$class)
+
+respoly_lc <- left_join(res_df, land_cover_names, by = "class")
+      
+  return(respoly_lc)
+}
+
+buffer_size <- c(100, 250,500,750,1000,2000) # set buffer sizes
+
+# Suppress the warning
+suppressWarnings({
+#Run the polyFragStats function on the focal points
+respoly <- ldply(buffer_size, function(j) {
+  ldply(1:length(POLY), function(i) {  # for each point
+    out <- polyFragStats(POLY[i,], radius=j, veg=veg) # compute fragstats metrics 
+    out$buffer_size <- j
+    out$point_ID <- POLY$uniqueforID[i]
+    return(out)
+  })  
+})
+})
+
+```
+
+```{r}
+#Spare code ####
+
+
+#calculate percentage of landscape of each class (lsm_c_pland)
+#calculate juxtaposition and interspersion index (lsm_l_iji)
+
+library(landscapemetrics)
+lsm_NY54 <- sample_lsm(lcm.NY, #landscape of interest as a Raster Layer
+            y = focal.points.lm, #2-column matrix with sf points 
+            plot_id = plot_id,
+            shape = "circle", #shape of buffer to sample
+            size = 10, #radius of buffer to sample
+            what = c("lsm_c_pland", # calculate perc cover of land cover types
+                    "lsm_l_iji"), #calculate juxtaposition and interspersion index for landscape
+            return_raster = TRUE
+                    
+          )
+
+#Extract landscape metrics for focal points for Alternative forage ####
+
+#Metrics to use:
+
+????
+
+#convert raster to points
+alt.forage.rast.points <- rasterToPoints(alt.forage.focal.area.buffer, spatial = TRUE)
+#convert to spatial object
+alt.forage.rast.points <- st_as_sf(alt.forage.rast.points)
+#rename column
+colnames(alt.forage.rast.points)[1] <- "alt.forage.quality"
+#get unique id for each point
+alt.forage.rast.points$uniqueforID <- paste("for",alt.forage.rast.points$geometry,sep="_")
+#merge
+focal.points <- focal.points %>%
+  st_join(alt.forage.rast.points %>% select(alt.forage.quality), by = "uniqueforID")
+```
+
+
+
